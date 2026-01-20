@@ -104,7 +104,19 @@ function cosine(a, b) {
 }
 
 async function retrieveContext(text, category) {
-  const q = await embedder(text, { pooling: "mean", normalize: true });
+  // 🔒 Guard: model not ready
+  if (!embedder || !kbEmbeddings.length) return [];
+
+  let q;
+  try {
+    q = await embedder(text, { pooling: "mean", normalize: true });
+  } catch (e) {
+    console.warn("Embedding failed, skipping RAG");
+    return [];
+  }
+
+  // 🔒 Guard: invalid embedding
+  if (!q || !q.data) return [];
 
   return kbEmbeddings
     .filter(k => k.category === category)
