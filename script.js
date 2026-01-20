@@ -1,19 +1,26 @@
-import { pipeline } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2";
+import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2";
 import { MENTAL_HEALTH_KB } from "./mental_health_kb.js";
 
-/* ---------- DOM ---------- */
+/* ---------------- ENV ---------------- */
+env.allowLocalModels = false;
+env.allowRemoteModels = true;
+env.useBrowserCache = true;
+
+/* ---------------- DOM ---------------- */
 const chatContainer = document.getElementById("chatContainer");
 const userInput = document.getElementById("userInput");
 const sendButton = document.getElementById("sendButton");
 const statusMessage = document.getElementById("statusMessage");
 
-/* ---------- AI STATE ---------- */
-let embedder, generator;
+/* ---------------- STATE ---------------- */
+let embedder;
 let kbEmbeddings = [];
+let ready = false;
 
-/* ---------- CRISIS ---------- */
+/* ---------------- CRISIS ---------------- */
 const crisisKeywords = [
-  "suicide","kill myself","end it all","hurt myself","self harm","want to die"
+  "suicide", "kill myself", "end it all",
+  "hurt myself", "self harm", "want to die"
 ];
 
 function containsCrisis(text) {
@@ -27,15 +34,54 @@ Please reach out immediately:
 • Crisis Text Line: Text HOME to 741741
 • Suicide Prevention Lifeline: 988
 
-You don’t have to face this alone. 💜`;
+You are not alone. 💜`;
 }
 
-/* ---------- CATEGORY ---------- */
+/* ---------------- INTENT ---------------- */
+function detectIntent(text) {
+  const t = text.toLowerCase().trim();
+
+  if (t.length <= 3 || ["hi","hello","hey","yo","hii"].includes(t)) {
+    return "greeting";
+  }
+
+  if (["wtf","ayein","abeee","bhai","???"].some(k => t.includes(k))) {
+    return "confusion";
+  }
+
+  if (["fuck","shit","bc","mc","nigga"].some(k => t.includes(k))) {
+    return "abuse";
+  }
+
+  if (t.split(" ").length <= 2) {
+    return "low_info";
+  }
+
+  return "emotional";
+}
+
+const INTENT_RESPONSES = {
+  greeting: [
+    "Hey 👋 I’m here with you. What’s been on your mind lately?",
+    "Hi! Tell me what’s going on."
+  ],
+  confusion: [
+    "😅 Looks like something didn’t land right. Want to explain?",
+    "I’m listening — what just happened?"
+  ],
+  abuse: [
+    "I’m here to help, but let’s keep it respectful. What’s really bothering you?",
+    "Sounds like a lot of frustration — want to talk about it?"
+  ],
+  low_info: [
+    "I’m listening 🙂 Can you share a bit more?",
+    "Take your time — what’s going on for you?"
+  ]
+};
+
+/* ---------------- CATEGORY ---------------- */
 const categories = {
-  stress_academic: ["exam","deadline","study","grades"],
-  anxiety_worry: ["anxious","panic","worried"],
-  sadness_depression: ["sad","empty","hopeless"],
-  self_esteem: ["worthless","stupid","hate myself"]
+  stress_academic: ["exam","deadline","study","grades","academic"]
 };
 
 function detectCategory(text) {
@@ -46,84 +92,157 @@ function detectCategory(text) {
   return "general_support";
 }
 
-/* ---------- RAG ---------- */
-function cosine(a,b){
-  let d=0,na=0,nb=0;
-  for(let i=0;i<a.length;i++){
-    d+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i];
+/* ---------------- RAG ---------------- */
+function cosine(a, b) {
+  let d = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    d += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
   }
-  return d/(Math.sqrt(na)*Math.sqrt(nb));
+  return d / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
 async function retrieveContext(text, category) {
-  const q = await embedder(text,{pooling:"mean",normalize:true});
+  const q = await embedder(text, { pooling: "mean", normalize: true });
+
   return kbEmbeddings
-    .filter(k=>k.category===category)
-    .map(k=>({...k,score:cosine(q.data,k.embedding)}))
-    .sort((a,b)=>b.score-a.score)
-    .slice(0,2);
+    .filter(k => k.category === category)
+    .map(k => ({ ...k, score: cosine(q.data, k.embedding) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
 }
 
-function buildPrompt(userText, ctx) {
+/* ---------------- LANGUAGE ---------------- */
+function detectLanguage(text) {
+  const hindiHints = ["bhai","yaar","samajh","thoda","kya","ayein","abey"];
+  const t = text.toLowerCase();
+  return hindiHints.some(w => t.includes(w)) ? "hinglish" : "english";
+}
+
+/* ---------------- PROMPT ---------------- */
+function buildSystemPrompt(language) {
+  let prompt = `
+You are a warm, emotionally intelligent mental wellness companion.
+
+Rules:
+- Sound natural and conversational (like ChatGPT)
+- Validate emotions first
+- Ask gentle follow-up questions
+- 2–4 sentences max
+- No diagnosis or medical advice
+- Do not repeat phrasing
+`;
+
+  if (language === "hinglish") {
+    prompt += `
+Use Hinglish (Hindi + English mix).
+Casual, friendly Indian tone.
+`;
+  }
+
+  return prompt;
+}
+
+function buildContext(rag) {
+  if (!rag.length) return "";
   return `
-You are a calm, empathetic mental wellness companion.
-No advice, no diagnosis.
-
-Context:
-${ctx.map(c=>"- "+c.text).join("\n")}
-
-User: "${userText}"
-
-Respond warmly in 2–3 sentences.
+Background emotional context (use subtly):
+${rag.map(r => "- " + r.text).join("\n")}
 `;
 }
 
-/* ---------- INIT ---------- */
+/* ---------------- SERVER CALL ---------------- */
+async function callLLM(messages) {
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages })
+  });
+  const data = await res.json();
+ async function callLLM(messages) {
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages })
+  });
+
+  const data = await res.json();
+
+  // 🔒 SAFETY GUARD
+  if (!data || !data.content) {
+    return "Samajh raha hoon. Thoda aur bataoge kya ho raha hai?";
+  }
+
+  return data.content.trim();
+}
+
+}
+
+/* ---------------- INIT ---------------- */
 async function initAI() {
-  statusMessage.textContent = "Loading models locally...";
-  embedder = await pipeline("feature-extraction","Xenova/all-MiniLM-L6-v2");
-  generator = await pipeline("text-generation","Xenova/distilgpt2");
+  statusMessage.textContent = "Loading AI locally… 🧠";
+
+  embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
 
   for (const item of MENTAL_HEALTH_KB) {
-    const e = await embedder(item.text,{pooling:"mean",normalize:true});
-    kbEmbeddings.push({...item, embedding:e.data});
+    const e = await embedder(item.text, { pooling: "mean", normalize: true });
+    kbEmbeddings.push({ ...item, embedding: e.data });
   }
-  statusMessage.textContent = "AI ready (100% private)";
+
+  ready = true;
+  statusMessage.textContent = "AI ready • Secure cloud responses 🔒";
 }
 initAI();
 
-/* ---------- UI ---------- */
-function addMessage(sender,text){
-  const div=document.createElement("div");
-  div.className=`message ${sender}`;
-  div.textContent=text;
+/* ---------------- UI ---------------- */
+function addMessage(sender, text) {
+  const div = document.createElement("div");
+  div.className = `message ${sender}`;
+  div.textContent = text;
   chatContainer.appendChild(div);
-  chatContainer.scrollTop=chatContainer.scrollHeight;
+  chatContainer.scrollTop = chatContainer.scrollHeight;
 }
 
-/* ---------- MAIN ---------- */
-async function handleMessage(){
-  const text=userInput.value.trim();
-  if(!text) return;
+/* ---------------- MAIN ---------------- */
+async function handleMessage() {
+  if (!ready) return;
 
-  addMessage("user",text);
-  userInput.value="";
+  const text = userInput.value.trim();
+  if (!text) return;
+
+  addMessage("user", text);
+  userInput.value = "";
 
   let reply;
-  if(containsCrisis(text)){
-    reply=crisisResponse();
+
+  if (containsCrisis(text)) {
+    reply = crisisResponse();
   } else {
-    const cat=detectCategory(text);
-    const ctx=await retrieveContext(text,cat);
-    const prompt=buildPrompt(text,ctx);
-    const out=await generator(prompt,{max_length:120,temperature:0.7});
-    reply=out[0].generated_text.replace(prompt,"").trim();
+    const intent = detectIntent(text);
+
+    if (intent !== "emotional") {
+      const options = INTENT_RESPONSES[intent];
+      reply = options[Math.floor(Math.random() * options.length)];
+    } else {
+      const category = detectCategory(text);
+      const rag = await retrieveContext(text, category);
+      const language = detectLanguage(text);
+
+      const messages = [
+        { role: "system", content: buildSystemPrompt(language) },
+        ...(rag.length ? [{ role: "system", content: buildContext(rag) }] : []),
+        { role: "user", content: text }
+      ];
+
+      reply = await callLLM(messages);
+    }
   }
 
-  addMessage("assistant",reply);
+  addMessage("assistant", reply);
 }
 
 sendButton.onclick = handleMessage;
-userInput.addEventListener("keydown",e=>{
-  if(e.key==="Enter") handleMessage();
+userInput.addEventListener("keydown", e => {
+  if (e.key === "Enter") handleMessage();
 });
