@@ -116,8 +116,9 @@ async function retrieveContext(text, category) {
 /* ---------------- LANGUAGE ---------------- */
 function detectLanguage(text) {
   const hindiHints = ["bhai","yaar","samajh","thoda","kya","ayein","abey"];
-  const t = text.toLowerCase();
-  return hindiHints.some(w => t.includes(w)) ? "hinglish" : "english";
+  return hindiHints.some(w => text.toLowerCase().includes(w))
+    ? "hinglish"
+    : "english";
 }
 
 /* ---------------- PROMPT ---------------- */
@@ -159,24 +160,14 @@ async function callLLM(messages) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages })
   });
-  const data = await res.json();
- async function callLLM(messages) {
-  const res = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages })
-  });
 
   const data = await res.json();
 
-  // 🔒 SAFETY GUARD
   if (!data || !data.content) {
     return "Samajh raha hoon. Thoda aur bataoge kya ho raha hai?";
   }
 
   return data.content.trim();
-}
-
 }
 
 /* ---------------- INIT ---------------- */
